@@ -23,6 +23,10 @@ env/
 # --- Agent runtime artifacts ---
 agent_transcript.jsonl
 
+# --- Docker mounted workspace (keep the folder, ignore its contents) ---
+workspace/*
+!workspace/.gitkeep
+
 # --- OS / editor cruft ---
 .DS_Store
 Thumbs.db

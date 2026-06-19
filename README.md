@@ -68,6 +68,42 @@ Type instructions at the `>` prompt. Type `exit` (or `quit`) to leave.
   Done — calc.py has add(a, b); add(2, 3) returned 5.
 ```
 
+## Run with Docker
+
+The container doubles as a **sandbox**: the agent's file writes and shell
+commands stay inside the container, operating on whatever you mount at
+`/workspace`. Your API key is passed at runtime and never baked into the image.
+
+The image is built from the published repo
+(`github.com/aldenowang/SamplePythonAgent`); it clones and installs the package
+at build time. Build the image:
+
+```bash
+docker build -t mini-coding-agent .
+
+# Pin a specific branch or tag:
+docker build --build-arg AGENT_REF=main -t mini-coding-agent .
+```
+
+Run it interactively (mount the directory you want the agent to work on):
+
+```bash
+# macOS/Linux
+docker run -it --rm --env-file .env -v "$PWD/workspace:/workspace" mini-coding-agent
+
+# Windows PowerShell
+docker run -it --rm --env-file .env -v "${PWD}\workspace:/workspace" mini-coding-agent
+```
+
+Or use Docker Compose (note `run`, not `up`, so you get an interactive TTY):
+
+```bash
+docker compose run --rm agent
+```
+
+The `-it` flags / `stdin_open` + `tty` are required because the REPL and the
+confirmation prompts read from the terminal.
+
 ## Test
 
 ```bash

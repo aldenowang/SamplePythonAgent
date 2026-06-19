@@ -1,0 +1,16 @@
+# Convenience wrapper. Use:
+#   docker compose run --rm agent
+# (`run` gives a proper interactive TTY for the REPL and confirmation prompts).
+
+services:
+  agent:
+    build: .
+    image: mini-coding-agent
+    env_file:
+      - .env
+    stdin_open: true   # docker run -i
+    tty: true          # docker run -t
+    volumes:
+      # The directory the agent reads/writes/executes in. Point this at the
+      # project you want the agent to work on.
+      - ./workspace:/workspace
