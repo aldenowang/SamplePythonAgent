@@ -37,7 +37,7 @@ class Confirmer:
             )
         )
         answer = self._input(
-            "[yellow]Proceed? [y]es / [n]o / [a]llow-all this session: [/yellow]"
+            r"[yellow]Proceed? \[y]es / \[n]o / \[a]llow-all this session: [/yellow]"
         ).strip().lower()
 
         if answer in {"a", "all"}:
