@@ -1,23 +1,12 @@
-import math
 
-a = 80.0
-phi0 = 1e13
-D = 0.8
-sigma_a = 0.008
-x = 20.0
+t = 43.51        # days elapsed
+N_t = 3.529      # grams remaining
+t_half = 8.02    # half-life in days
 
-kappa = math.sqrt(sigma_a / D)
-print("kappa =", kappa, "cm^-1")
-print("kappa*a =", kappa * a)
-print("kappa*(a-x) =", kappa * (a - x))
+# N(t) = N0 * (1/2)^(t / t_half)
+# N0 = N(t) / (1/2)^(t / t_half)
 
-sinh_ka = math.sinh(kappa * a)
-sinh_kamx = math.sinh(kappa * (a - x))
-print("sinh(kappa*a) =", sinh_ka)
-print("sinh(kappa*(a-x)) =", sinh_kamx)
-
-ratio = sinh_kamx / sinh_ka
-phi_20 = phi0 * ratio
-print("ratio =", ratio)
-print("phi(20) =", phi_20)
-print("phi(20) = {:.4e}".format(phi_20))
+N0 = N_t / (0.5 ** (t / t_half))
+print(f"Number of half-lives: {t / t_half}")
+print(f"Initial quantity: {N0} grams")
+print(f"Initial quantity (rounded to 2 decimal places): {round(N0, 2)} grams")

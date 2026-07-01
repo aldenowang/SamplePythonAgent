@@ -1,0 +1,147 @@
+"""
+transcript_reader.py
+---------------------
+Human-readable view of what the agent did during an eval question.
+
+Usage:
+    python tests/transcript_reader.py transcripts/NeutronDiffusion_Q3.jsonl
+    python tests/transcript_reader.py transcripts/NeutronDiffusion_Q3.jsonl --full
+    python tests/transcript_reader.py --list
+
+Options:
+    --full    Show complete thinking traces (default: summarized)
+    --list    List all available transcripts with their question number and simulator
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+TRANSCRIPT_DIR = Path("transcripts")
+THINK_PREVIEW_CHARS = 300  # how much of thinking to show in summary mode
+
+
+def load_transcript(path: Path) -> list[dict]:
+    events = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                events.append(json.loads(line))
+    return events
+
+
+def format_event(event: dict, full: bool = False) -> str | None:
+    etype = event.get("type", "")
+    payload = event.get("payload", {})
+
+    if etype == "user_input":
+        text = payload.get("text", "")
+        return f"\n{'='*60}\n📥 QUESTION:\n{text}\n{'='*60}"
+
+    elif etype == "thinking":
+        text = payload.get("text", "")
+        if not full:
+            preview = text[:THINK_PREVIEW_CHARS]
+            if len(text) > THINK_PREVIEW_CHARS:
+                preview += f"... [{len(text) - THINK_PREVIEW_CHARS} more chars]"
+            return f"\n💭 THINKING:\n{preview}"
+        return f"\n💭 THINKING (full):\n{text}"
+
+    elif etype == "agent_text":
+        text = payload.get("text", "")
+        return f"\n🤖 AGENT:\n{text}"
+
+    elif etype == "pre_tool_use":
+        name = payload.get("name", "")
+        inp = payload.get("input", {})
+        inp_str = json.dumps(inp, indent=2)
+        return f"\n🔧 TOOL CALL → {name}:\n{inp_str}"
+
+    elif etype == "post_tool_use":
+        name = payload.get("name", "")
+        content = payload.get("content", "")
+        is_error = payload.get("is_error", False)
+        icon = "❌" if is_error else "✅"
+        if not full and len(content) > 500:
+            content = content[:500] + f"... [{len(content) - 500} more chars]"
+        return f"\n{icon} TOOL RESULT ← {name}:\n{content}"
+
+    elif etype == "stop":
+        text = payload.get("text", "")
+        return f"\n🏁 FINAL ANSWER:\n{text}\n{'='*60}"
+
+    elif etype == "notice":
+        msg = payload.get("message", "")
+        return f"\n⚠️  NOTICE: {msg}"
+
+    return None  # skip unknown event types
+
+
+def print_transcript(path: Path, full: bool = False) -> None:
+    if not path.exists():
+        print(f"File not found: {path}")
+        sys.exit(1)
+
+    events = load_transcript(path)
+    print(f"\nTranscript: {path.name}  ({len(events)} events)\n")
+
+    # Count tool calls for summary
+    tool_calls = [e for e in events if e.get("type") == "pre_tool_use"]
+    thinking_events = [e for e in events if e.get("type") == "thinking"]
+    thinking_chars = sum(len(e.get("payload", {}).get("text", "")) for e in thinking_events)
+
+    print(f"Summary: {len(tool_calls)} tool call(s), "
+          f"{len(thinking_events)} thinking block(s), "
+          f"~{thinking_chars} thinking chars total")
+
+    if tool_calls:
+        print("Tools used:", ", ".join(e["payload"].get("name", "?") for e in tool_calls))
+
+    print()
+
+    for event in events:
+        formatted = format_event(event, full=full)
+        if formatted:
+            print(formatted)
+
+
+def list_transcripts() -> None:
+    if not TRANSCRIPT_DIR.exists():
+        print("No transcripts directory found. Run eval.py first.")
+        sys.exit(0)
+
+    files = sorted(TRANSCRIPT_DIR.glob("*.jsonl"))
+    if not files:
+        print("No transcripts found yet. Run eval.py first.")
+        sys.exit(0)
+
+    print(f"\nAvailable transcripts in {TRANSCRIPT_DIR}/:\n")
+    for f in files:
+        events = load_transcript(f)
+        tool_calls = sum(1 for e in events if e.get("type") == "pre_tool_use")
+        thinking_chars = sum(
+            len(e.get("payload", {}).get("text", ""))
+            for e in events if e.get("type") == "thinking"
+        )
+        print(f"  {f.name:<40} {len(events):>3} events  "
+              f"{tool_calls} tools  ~{thinking_chars} thinking chars")
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+
+    if not args or "--list" in args:
+        list_transcripts()
+        sys.exit(0)
+
+    full = "--full" in args
+    paths = [a for a in args if not a.startswith("--")]
+
+    if not paths:
+        print("Usage: python tests/transcript_reader.py <transcript.jsonl> [--full]")
+        sys.exit(1)
+
+    print_transcript(Path(paths[0]), full=full)

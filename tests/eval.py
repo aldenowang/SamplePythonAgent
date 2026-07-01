@@ -6,17 +6,20 @@ Runs simulator questions through the agent and reports pass/fail.
 Usage (from project root, with venv active):
 
     # Run a specific simulator:
-    python tests/eval.py ideal_gas
-    python tests/eval.py radioactive_decay
-    python tests/eval.py separable_ode
-    python tests/eval.py heat_conduction
-    python tests/eval.py neutron_diffusion
+    python tests/eval.py idealGasLaw
+    python tests/eval.py RadioactiveDecay
+    python tests/eval.py SeperableDiffEqs
+    python tests/eval.py HeatConduction
+    python tests/eval.py NeutronDiffusion
 
     # Run all simulators:
     python tests/eval.py
 
     # See available simulators:
     python tests/eval.py --list
+
+Each question gets its own transcript saved to transcripts/<simulator>_Q<n>.jsonl
+Read them with: python tests/transcript_reader.py --list
 """
 
 from __future__ import annotations
@@ -26,9 +29,10 @@ import sys
 import time
 from dataclasses import dataclass
 
-# --- Import all simulators ---
-# Add src/ to path so we can import the simulators
-sys.path.insert(0, "src")
+import numpy as np
+
+# Add project root to path so simulators can be imported
+sys.path.insert(0, ".")
 
 from simulators.idealGasLaw.idealGasLaw import sampleQuestions as IDEAL_GAS_QUESTIONS
 from simulators.RadioactiveDecay.RadioactiveDecay import sampleQuestions as RADIOACTIVE_QUESTIONS
@@ -38,18 +42,18 @@ from simulators.NeutronDiffusion.NeutronDiffusion import sampleQuestions as NEUT
 
 
 # --- Tolerances per simulator ---
-# How close does the agent's answer need to be (as a fraction of ground truth)?
-# e.g. 0.01 = within 1%
+# All set to 1% — consistent with Roy et al. (2026) which considers
+# neural operator surrogates production-ready at ~1.5% relative L2 error.
+# Since our simulators have exact analytical solutions, 1% accounts only
+# for floating point rounding and agent response formatting.
 TOLERANCES = {
-    "idealGasLaw":        0.01,   # algebra, exact — 1%
-    "RadioactiveDecay":   0.01,   # exponential, exact — 1%
-    "SeperableDiffEqs":   0.01,   # calculus, slight rounding — 2%
-    "HeatConduction":     0.01,   # ODE, slight rounding — 2%
-    "NeutronDiffusion":   0.01,   # sinh of large numbers, more rounding — 5%
+    "idealGasLaw":      0.01,
+    "RadioactiveDecay": 0.01,
+    "SeperableDiffEqs": 0.01,
+    "HeatConduction":   0.01,
+    "NeutronDiffusion": 0.01,
 }
 
-
-# --- All simulators bundled together ---
 ALL_SIMULATORS = [
     ("idealGasLaw",       IDEAL_GAS_QUESTIONS),
     ("RadioactiveDecay",  RADIOACTIVE_QUESTIONS),
@@ -59,46 +63,59 @@ ALL_SIMULATORS = [
 ]
 
 
+# Sentinel values to distinguish failure modes
+TIMEOUT  = "TIMEOUT"
+NONZERO  = "NONZERO_EXIT"
+
+
 @dataclass
 class Result:
-    simulator:   str
+    simulator:    str
     question_num: int
-    question:    str
+    question:     str
     ground_truth: float
     agent_answer: float | None
-    passed:      bool
-    tolerance:   float
-    error_msg:   str | None = None
+    passed:       bool
+    tolerance:    float
+    elapsed:      float
+    failure_mode: str | None = None   # None, "wrong_answer", "parse_error",
+                                      # "timeout", "nonzero_exit"
+    raw_output:   str | None = None   # what the agent actually said (for debugging)
+    error_msg:    str | None = None
 
 
-def call_agent(question: str) -> str | None:
+def call_agent(question: str, transcript_path: str | None = None) -> str | None:
     """
     Call the agent in eval mode and return its raw stdout output.
-    Returns None if the subprocess fails.
+    Returns TIMEOUT or NONZERO sentinel strings on those failure modes.
+    Returns None only on unexpected exceptions.
     """
+    cmd = [sys.executable, "-m", "adversarial_agent.main", "--eval", question]
+    if transcript_path:
+        cmd.append(transcript_path)
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "cmu_project.main", "--eval", question],
+            cmd,
             capture_output=True,
             text=True,
-            timeout=120,   # 2 min max per question
+            timeout=300,   # 5 minutes — neutron diffusion can take ~100s
         )
         if result.returncode != 0:
-            return None
+            return NONZERO
         return result.stdout.strip()
     except subprocess.TimeoutExpired:
-        return None
-    except Exception:
+        return TIMEOUT
+    except Exception as exc:
         return None
 
 
 def parse_answer(raw: str | None) -> float | None:
     """
     Parse the agent's stdout into a float.
-    The agent should output just a number like '243.6'.
-    Returns None if parsing fails.
+    The agent outputs just a number like '243.6' or '1.353e12'.
+    Returns None if parsing fails — caller should check raw_output to debug.
     """
-    if raw is None:
+    if raw is None or raw in (TIMEOUT, NONZERO):
         return None
     try:
         return float(raw.strip())
@@ -108,16 +125,11 @@ def parse_answer(raw: str | None) -> float | None:
 
 def check_tolerance(agent_answer: float, ground_truth: float, tolerance: float) -> bool:
     """
-    Check if agent_answer is within `tolerance` fraction of ground_truth.
-    e.g. tolerance=0.01 means within 1%.
-
-    Handles the case where ground_truth is very close to zero.
+    Check if agent_answer is within tolerance fraction of ground_truth.
+    Uses numpy isclose: abs(a-b) <= atol + rtol * abs(b)
+    atol=1e-8 handles near-zero ground truths safely.
     """
-    if abs(ground_truth) < 1e-10:
-        # ground truth is basically zero — use absolute tolerance
-        return abs(agent_answer - ground_truth) < 1e-6
-    relative_error = abs(agent_answer - ground_truth) / abs(ground_truth)
-    return relative_error <= tolerance
+    return bool(np.isclose(agent_answer, ground_truth, rtol=tolerance, atol=1e-8))
 
 
 def run_all_evals(simulators: list) -> list[Result]:
@@ -136,26 +148,60 @@ def run_all_evals(simulators: list) -> list[Result]:
             print(f"\nQ{i}: {question[:80]}...")
             print(f"     Ground truth: {ground_truth:.6g}")
 
-            # Call agent
+            # Each question gets its own transcript file
+            transcript_path = f"transcripts/{simulator_name}_Q{i}.jsonl"
+
             start = time.time()
-            raw_output = call_agent(question)
+            raw_output = call_agent(question, transcript_path)
             elapsed = time.time() - start
 
-            # Parse answer
             agent_answer = parse_answer(raw_output)
 
-            # Check pass/fail
-            if agent_answer is None:
+            # --- Determine failure mode ---
+            failure_mode = None
+            error_msg = None
+
+            if raw_output == TIMEOUT:
                 passed = False
-                error_msg = f"Could not parse output: {repr(raw_output)}"
-                print(f"     Agent output: {repr(raw_output)}")
-                print(f"     ❌ FAIL — could not parse answer ({elapsed:.1f}s)")
+                failure_mode = "timeout"
+                error_msg = f"Agent exceeded 300s time limit"
+                print(f"     ⏰ TIMEOUT — agent exceeded 300s  ({elapsed:.1f}s)")
+                print(f"     📄 Transcript: {transcript_path}")
+
+            elif raw_output == NONZERO:
+                passed = False
+                failure_mode = "nonzero_exit"
+                error_msg = "Agent process exited with non-zero return code"
+                print(f"     💥 CRASH — agent exited with error  ({elapsed:.1f}s)")
+                print(f"     📄 Transcript: {transcript_path}")
+
+            elif agent_answer is None:
+                passed = False
+                failure_mode = "parse_error"
+                error_msg = f"Could not parse as float: {repr(raw_output)}"
+                # Show what the agent actually said so you can debug
+                print(f"     ⚠️  PARSE ERROR — agent said: {repr(raw_output)}")
+                print(f"     (Did the agent forget to write 'ANSWER: <number>'?)")
+                print(f"     ({elapsed:.1f}s)")
+                print(f"     📄 Transcript: {transcript_path}")
+
             else:
                 passed = check_tolerance(agent_answer, ground_truth, tolerance)
-                error_msg = None
-                relative_error = abs(agent_answer - ground_truth) / abs(ground_truth) if abs(ground_truth) > 1e-10 else 0
+                if passed:
+                    failure_mode = None
+                else:
+                    failure_mode = "wrong_answer"
+                    error_msg = f"Answer outside {tolerance*100:.0f}% tolerance"
+
+                relative_error = (
+                    abs(agent_answer - ground_truth) / abs(ground_truth)
+                    if abs(ground_truth) > 1e-10 else 0
+                )
                 status = "✅ PASS" if passed else "❌ FAIL"
-                print(f"     Agent answer: {agent_answer:.6g}  (error: {relative_error*100:.2f}%)  {status}  ({elapsed:.1f}s)")
+                print(f"     Agent answer: {agent_answer:.6g}  "
+                      f"(error: {relative_error*100:.2f}%)  {status}  ({elapsed:.1f}s)")
+                if not passed:
+                    print(f"     📄 Transcript: {transcript_path}")
 
             results.append(Result(
                 simulator=simulator_name,
@@ -165,6 +211,9 @@ def run_all_evals(simulators: list) -> list[Result]:
                 agent_answer=agent_answer,
                 passed=passed,
                 tolerance=tolerance,
+                elapsed=elapsed,
+                failure_mode=failure_mode,
+                raw_output=raw_output,
                 error_msg=error_msg,
             ))
 
@@ -176,35 +225,53 @@ def print_summary(results: list[Result], simulators: list) -> None:
     print("SUMMARY")
     print(f"{'='*60}")
 
-    # Per-simulator breakdown
     for simulator_name, _ in simulators:
         sim_results = [r for r in results if r.simulator == simulator_name]
         passed = sum(1 for r in sim_results if r.passed)
         total = len(sim_results)
+        avg_time = sum(r.elapsed for r in sim_results) / total if total else 0
         bar = "█" * passed + "░" * (total - passed)
-        print(f"  {simulator_name:<20} {bar}  {passed}/{total}")
+        print(f"  {simulator_name:<20} {bar}  {passed}/{total}  avg {avg_time:.0f}s/q")
 
-    # Overall
     total_passed = sum(1 for r in results if r.passed)
     total = len(results)
     print(f"\n  TOTAL: {total_passed}/{total} passed ({total_passed/total*100:.0f}%)")
 
-    # List all failures
     failures = [r for r in results if not r.passed]
     if failures:
         print(f"\nFAILURES:")
         for r in failures:
-            print(f"  [{r.simulator}] Q{r.question_num}")
+            mode_label = {
+                "wrong_answer":  "❌ Wrong answer",
+                "parse_error":   "⚠️  Parse error",
+                "timeout":       "⏰ Timeout",
+                "nonzero_exit":  "💥 Crash",
+            }.get(r.failure_mode, "❌ Unknown")
+
+            print(f"\n  [{r.simulator}] Q{r.question_num}  —  {mode_label}  ({r.elapsed:.1f}s)")
             print(f"    Ground truth:  {r.ground_truth:.6g}")
             print(f"    Agent answer:  {r.agent_answer}")
+
+            if r.failure_mode == "parse_error":
+                print(f"    Agent said:    {repr(r.raw_output)}")
+
             if r.error_msg:
-                print(f"    Error: {r.error_msg}")
+                print(f"    Detail:        {r.error_msg}")
+
+            print(f"    Transcript:    transcripts/{r.simulator}_Q{r.question_num}.jsonl")
     else:
         print("\n  All questions passed! 🎉")
 
+    # Slowest questions
+    slowest = sorted(results, key=lambda r: r.elapsed, reverse=True)[:3]
+    print(f"\nSLOWEST QUESTIONS:")
+    for r in slowest:
+        print(f"  [{r.simulator}] Q{r.question_num}: {r.elapsed:.1f}s")
+        print(f"    → python tests/transcript_reader.py "
+              f"transcripts/{r.simulator}_Q{r.question_num}.jsonl")
+
 
 if __name__ == "__main__":
-    # --- Handle command line argument ---
     VALID_NAMES = [name for name, _ in ALL_SIMULATORS]
 
     if len(sys.argv) == 2 and sys.argv[1] == "--list":
@@ -218,12 +285,9 @@ if __name__ == "__main__":
         if chosen not in VALID_NAMES:
             print(f"Unknown simulator '{chosen}'.")
             print(f"Available: {', '.join(VALID_NAMES)}")
-            print(f"Run all:   python tests/eval.py")
             sys.exit(1)
-        # Run just the chosen simulator
         simulators_to_run = [(name, q) for name, q in ALL_SIMULATORS if name == chosen]
     else:
-        # No argument — run all
         simulators_to_run = ALL_SIMULATORS
 
     total_q = sum(len(q) for _, q in simulators_to_run)

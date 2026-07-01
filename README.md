@@ -1,140 +1,117 @@
-# mini coding agent
+Adversarial Agent
+--Final Goal--
+"Hagent" (Hacker-Agent): An AI agent that can autonomously discover adversarial vulnerabilities in neural operator surrogate models used in nuclear reactor digital twins. 
 
-A minimal, terminal-based coding agent — a "mini Claude Code" — built in Python
-on the Anthropic API. It reads/writes/edits files, runs bash commands, and can
-delegate subtasks to sub-agents. Its **extended-thinking trace** and **tool
-calls** are surfaced live in a `rich` terminal UI.
+We want to see if the LLM can replicate the vulnerability methodology of this paper when given only a black box of inputs and outputs:
+Roy, S., Kobayashi, K., Chakraborty, S., Rizwan-uddin, & Alam, S.B. (2026). Adversarial Vulnerabilities in Neural Operator Digital Twins: Gradient-Free Attacks on Nuclear Thermal-Hydraulic Surrogates. arXiv:2603.22525
 
-This project is intentionally simple and readable: it's meant as a **teaching
-reference** for how a coding agent works end to end. See `architecture.md` for
-the full design and `tasks.md` for the build breakdown.
+Overview
 
-## Features
+This project builds an AI agent that can reason about physics problems from first principles, evaluated against five physics simulators with known analytical solutions. The goal is to verify the agent has genuine physics reasoning capability before deploying it to discover adversarial vulnerabilities in neural operator surrogate models used in nuclear reactor digital twins.
 
-- Interactive terminal REPL with a polished `rich` UI.
-- Extended thinking rendered as a visible "thinking" trace.
-- Five tools: `read_file`, `write_file`, `edit_file`, `bash`, `spawn_subagent`.
-- Confirmation prompts before any destructive action (write/edit/bash).
-- Event-driven core: the agent emits events; the UI (and an optional transcript
-  logger) are listeners. Lifecycle events mirror Claude Code's hooks
-  (`PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`).
+Project Structure
 
-## Setup
+CMU_Project/
+  src/
+    adversarial_agent/      ← AI agent (ReAct loop, tools, Claude API, calls Opus 4.8)
+    simulators/
+      idealGasLaw/          ← Simulator 1: PV = nRT
+      RadioactiveDecay/     ← Simulator 2: N(t) = N0 * e^(-λt)
+      SeperableDiffEqs/     ← Simulator 3: dy/dx = f(x)g(y)
+      HeatConduction/       ← Simulator 4: k * d²T/dx² = 0
+      NeutronDiffusion/     ← Simulator 5: D * d²φ/dx² - Σa * φ = 0
+  tests/
+    eval.py                 ← Automated eval pipeline
+    transcript_reader.py    ← Debug tool for inspecting agent reasoning
+  transcripts/              ← Per-question agent reasoning traces (auto-generated)
 
-```bash
+Physics Simulators So Far
+
+Each simulator increases in difficulty. It provides an analytical ground truth to compare with the agent. The agent never sees the simulator code, it only receives the question in natural language and must solve it independently.
+
+1. Gas LawPV = nRT — solve for any variable given the other three
+2. Radioactive DecayN(t) = N₀ · e^(-λt) — exponential decay with half-life conversion
+3. Separable ODEsdy/dx = k·y (exponential) and dy/dx = ax^n (polynomial)
+4. 1D Heat ConductionSteady-state k·d²T/dx² + Q = 0 with optional internal heat generationSobhani et al. (2019)
+5. 1D Neutron DiffusionD·d²φ/dx² - Σa·φ = 0 with hyperbolic sine solution "Duderstadt & Hamilton (1976)"
+
+Eval Results
+
+The agent achieves 100% pass rate across all 5 simulators in both tool-enabled mode (writes and runs Python scripts) and reasoning-only mode (no tools). All answers are much less than the 1% tolerance of the ground truth — consistent with the ~1.5% production-grade accuracy threshold used in Roy et al. (2026).
+
+Notably, on the hardest question (neutron diffusion with highly absorbing material requiring evaluation of sinh(31.623)), the agent correctly approximated the large-argument hyperbolic function using exponential asymptotics and log base conversion, achieving 0.02% error without any code execution.
+
+Setup:
+
+  Prerequisites
+
+  Python 3.10+
+  Anthropic API key
+
+
+Installation
+
+bashgit clone <repo>
+cd CMU_Project
 python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS/Linux
-source .venv/bin/activate
+.\.venv\Scripts\Activate.ps1   # Windows
+pip install -e .
 
-pip install -e ".[dev]"   # or: pip install -r requirements.txt
-```
+Configuration
 
-Then configure your API key:
+Copy .env.example to .env and add your Anthropic API key:
 
-```bash
-copy .env.example .env    # Windows  (cp .env.example .env on macOS/Linux)
-# edit .env and set ANTHROPIC_API_KEY=...
-```
+ANTHROPIC_API_KEY=your_key_here
 
-Environment variables (see `.env.example`):
+Running the Agent (Interactive Mode)
 
-- `ANTHROPIC_API_KEY` (required) — your Anthropic API key.
-- `ANTHROPIC_MODEL` (optional) — override the default model (`claude-opus-4-8`).
-- `AGENT_TRANSCRIPT` (optional) — set to `1` to also write
-  `agent_transcript.jsonl`, one JSON record per event.
+bashpython -m adversarial_agent.main
 
-## Run
+Running Evals
 
-```bash
-python -m cmu_project.main
-```
+# Run a specific simulator
+python tests/eval.py idealGasLaw
+python tests/eval.py RadioactiveDecay
+python tests/eval.py SeperableDiffEqs
+python tests/eval.py HeatConduction
+python tests/eval.py NeutronDiffusion
 
-Type instructions at the `>` prompt. Type `exit` (or `quit`) to leave.
+# Run all simulators
+python tests/eval.py
 
-### Sample session
+# List available simulators
+python tests/eval.py --list
 
-```
-> add a function `add(a, b)` to calc.py and run it
+Debugging Failures
 
-  thinking  I'll create calc.py with an add function, then run it.
-  -> write_file   { "path": "calc.py", ... }
-  confirm: write_file   [y/n/a]  y
-  <- write_file   Wrote 48 bytes to calc.py
-  -> bash         { "command": "python -c \"import calc; print(calc.add(2,3))\"" }
-  confirm: bash   [y/n/a]  y
-  <- bash         exit=0  5
-  Done — calc.py has add(a, b); add(2, 3) returned 5.
-```
+Each question automatically generates a transcript at transcripts/<simulator>_Q<n>.jsonl logging the agent's full reasoning trace, tool calls, and thinking blocks.
 
-## Run with Docker
+# List all transcripts
+python tests/transcript_reader.py --list
 
-The container doubles as a **sandbox**: the agent's file writes and shell
-commands stay inside the container, operating on whatever you mount at
-`/workspace`. Your API key is passed at runtime and never baked into the image.
+# Read a specific transcript (summarized)
+python tests/transcript_reader.py transcripts/NeutronDiffusion_Q4.jsonl
 
-The image is built from the published repo
-(`github.com/aldenowang/SamplePythonAgent`); it clones and installs the package
-at build time. Build the image:
+# Full thinking trace
+python tests/transcript_reader.py transcripts/NeutronDiffusion_Q4.jsonl --full
 
-```bash
-docker build -t mini-coding-agent .
+Agent Architecture
 
-# Pin a specific branch or tag:
-docker build --build-arg AGENT_REF=main -t mini-coding-agent .
-```
+The agent is a ReAct-style loop built on the Anthropic API (Claude Opus 4.8) with the following tools:
 
-Run it interactively (mount the directory you want the agent to work on):
+bash: run shell commands
+read_file / write_file / edit_file — file I/O
+subagent: spawn and use a sub-agent for delegated tasks
 
-```bash
-# macOS/Linux
-docker run -it --rm --env-file .env -v "$PWD/workspace:/workspace" mini-coding-agent
+In eval mode, tool confirmations are auto-approved and all output is silenced except the final ANSWER: <number> line, which eval.py captures and checks against the ground truth oracle.
 
-# Windows PowerShell
-docker run -it --rm --env-file .env -v "${PWD}\workspace:/workspace" mini-coding-agent
-```
+Eval Tolerances
 
-Or use Docker Compose (note `run`, not `up`, so you get an interactive TTY):
+All simulators use 1% relative tolerance. Since our simulators have exact analytical solutions, 1% accounts only for floating point rounding and agent response formatting.
 
-```bash
-docker compose run --rm agent
-```
+References
 
-The `-it` flags / `stdin_open` + `tty` are required because the REPL and the
-confirmation prompts read from the terminal.
-
-## Test
-
-```bash
-pytest
-```
-
-Tests run fully offline (the Anthropic client is mocked).
-
-## Architecture (quick tour)
-
-```
-src/cmu_project/
-  main.py          REPL: builds the bus, renderer, runner
-  config.py        AgentConfig + env loading
-  events.py        EventBus, Event, EventType (Claude Code lifecycle names)
-  llm.py           Anthropic wrapper (extended thinking + tool use rules)
-  conversation.py  in-memory, thinking-block-preserving history
-  runner.py        the agent loop: emits events, dispatches tools
-  prompts.py       system prompts (main + sub-agent)
-  tools/           read_file, write_file, edit_file, bash, spawn_subagent
-  ui/              console, renderer (listener), confirm, transcript (listener)
-```
-
-The core (`runner`, `tools`) emits events and never imports the UI; the UI
-subscribes to the bus. See `architecture.md` for the full rationale, the
-extended-thinking + tool-use API rules, and the decision log.
-
-## Safety / sandbox warning
-
-This agent **executes model-decided file writes and shell commands on your
-machine**. Mitigations: every destructive action requires confirmation, bash
-runs with a timeout, and previews show exactly what will happen. It is **not
-sandboxed**. Run it only in a directory/repository you trust — ideally inside a
-disposable VM or container when experimenting.
+Roy et al. (2026) — Adversarial Vulnerabilities in Neural Operator Digital Twins. arXiv:2603.22525
+Sobhani et al. (2019) — Modulation of heat transfer for extended flame stabilization in porous media burners via topology gradation. Proceedings of the Combustion Institute, 37(4), 5697–5704. DOI: 10.1016/j.proci.2018.05.155
+Duderstadt, J.J. & Hamilton, L.J. (1976) — Nuclear Reactor Analysis. John Wiley & Sons. ISBN: 978-0471223634
+Li et al. (2021) — Fourier Neural Operator for Parametric Partial Differential Equations. ICLR 2021. arXiv:2010.08895

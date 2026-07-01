@@ -5,8 +5,12 @@ runner, and runs the REPL.
  
 EVAL MODE: pass a question as a command line argument to run a single turn
 and print only the final numeric answer. Example:
-    python -m cmu_project.main --eval "A gas has P=2 atm, V=10L, n=1mol. What is T in Kelvin?"
+    python -m adversarial_agent.main --eval "A gas has P=2 atm, V=10L, n=1mol. What is T in Kelvin?"
+    python -m adversarial_agent.main --eval "question" transcripts/idealGasLaw_Q1.jsonl
+
+    
 """
+
  
 from __future__ import annotations
  
@@ -32,31 +36,43 @@ from .ui.renderer import ConsoleRenderer
  
 EXIT_COMMANDS = {"exit", "quit", ":q"}
  
- 
-# --- NEW: system prompt for eval mode ---
-EVAL_SYSTEM_PROMPT = """You are a physics and math problem solver.
-You will be given a single question. Solve it step by step, then at the very end
-of your response output ONLY the final numeric answer on its own line in this format:
- 
+"""
+When you need to run Python code to compute an answer:
+- Always use the write_file tool to save a .py file first
+- Then run it with: python filename.py
+- Never use heredocs (<< EOF or << 'PYEOF') — they do not work on Windows
+- Never pipe through echo — it does not work reliably on Windows
+"""
+# --- EVAL MODE: system prompt for physics/math solving ---
+
+
+EVAL_SYSTEM_PROMPT = """You are a physics and math problem solver running on Windows PowerShell.
+
+Solve problems using only your own reasoning and calculations — do NOT use any tools, 
+do NOT write Python files, do NOT run bash commands. Work through the math step by step 
+in your head and compute the answer yourself.
+
+At the very end of your response output ONLY the final numeric answer on its own line:
+
 ANSWER: <number>
- 
+
 For example:
 ANSWER: 243.6
- 
+
 Do not include units, text, or anything else on the ANSWER line — just the number.
 If the answer is a list of indices (e.g. [2, 9]), output them comma-separated:
 ANSWER: 2,9
 """
  
  
-# --- NEW: auto-approving confirmer for eval mode ---
+# --- EVAL MODE: auto-approving confirmer ---
 class AutoConfirmer:
     """Approves all tool calls automatically — used in eval mode."""
     def ask(self, action: str, preview: object) -> bool:
         return True
  
  
-# --- NEW: extract number from agent's response ---
+# --- EVAL MODE: extract numeric answer from agent response ---
 def extract_answer(text: str) -> str | None:
     """
     Look for a line starting with 'ANSWER:' and return the value after it.
@@ -70,11 +86,14 @@ def extract_answer(text: str) -> str | None:
     return None
  
  
-# --- NEW: eval mode entry point ---
-def run_eval(question: str) -> None:
+# --- EVAL MODE: single-question entry point ---
+def run_eval(question: str, transcript_path: str | None = None) -> None:
     """
     Run a single question through the agent and print only the numeric answer.
     Used by eval.py — no REPL, no banners, no rich formatting on the answer.
+ 
+    If transcript_path is provided, logs all events (thinking, tool calls,
+    tool results, final answer) to that JSONL file for later debugging.
     """
     try:
         cfg = load_config()
@@ -82,18 +101,26 @@ def run_eval(question: str) -> None:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(1)
  
-    # Use a silent event bus — no console output during eval
     bus = EventBus()
-    # (no renderer subscribed — so nothing prints to terminal during the run)
+ 
+    # Subscribe transcript listener if path provided
+    if transcript_path:
+        from .ui.transcript import TranscriptListener
+        p = Path(transcript_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists():
+            p.unlink()   # delete old file before writing new one
+        bus.subscribe(TranscriptListener(transcript_path))
+    
  
     workdir = Path(os.getcwd())
     runner = AgentRunner(
         cfg=cfg,
         bus=bus,
         llm=LLMClient(cfg),
-        system_prompt=EVAL_SYSTEM_PROMPT,   # ← physics solver prompt, not coding agent
+        system_prompt=EVAL_SYSTEM_PROMPT,
         registry=build_registry(),
-        confirmer=AutoConfirmer(),           # ← auto-approves, no "Proceed?" prompts
+        confirmer=AutoConfirmer(),
         workdir=workdir,
         conversation=Conversation(),
     )
@@ -102,9 +129,8 @@ def run_eval(question: str) -> None:
     answer = extract_answer(final_text)
  
     if answer is not None:
-        print(answer)   # ← this is the ONLY thing printed to stdout
+        print(answer)
     else:
-        # Agent didn't follow the format — print full response so eval.py can debug
         print(f"PARSE_ERROR: {final_text}", file=sys.stderr)
         raise SystemExit(1)
  
@@ -148,13 +174,14 @@ def repl(runner: AgentRunner) -> None:
  
  
 def main() -> None:
-    # --- NEW: detect eval mode ---
+    # detect eval mode — question is argv[2], optional transcript path is argv[3]
     if len(sys.argv) >= 3 and sys.argv[1] == "--eval":
         question = sys.argv[2]
-        run_eval(question)
+        transcript_path = sys.argv[3] if len(sys.argv) >= 4 else None
+        run_eval(question, transcript_path)
         return
  
-    # --- EXISTING: normal REPL mode unchanged ---
+    # normal REPL mode
     try:
         cfg = load_config()
     except ConfigError as exc:

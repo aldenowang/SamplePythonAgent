@@ -1,4 +1,4 @@
-from cmu_project.conversation import Conversation, tool_result_block
+from adversarial_agent.conversation import Conversation, tool_result_block
 
 
 def test_assistant_blocks_stored_unchanged():
